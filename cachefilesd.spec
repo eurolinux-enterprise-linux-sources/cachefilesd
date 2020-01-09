@@ -1,12 +1,11 @@
 Name:           cachefilesd
-Version:        0.10.1
-Release:        2%{?dist}
+Version:        0.10.2
+Release:        1%{?dist}
 Summary:        CacheFiles userspace management daemon
 Group:          System Environment/Daemons
 License:        GPL
 URL:  		http://people.redhat.com/~dhowells/fscache/
 Source0:        http://people.redhat.com/dhowells/fscache/cachefilesd-%{version}.tar.bz2
-Patch1:		cachefilesd-0.10.1-fix-initscript.diff
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-root-%(%{__id_u} -n)
 BuildRequires: automake, autoconf
@@ -21,7 +20,6 @@ do persistent caching to the local disk.
 
 %prep
 %setup -q
-%patch1 -p1
 
 %build
 %ifarch s390 s390x
@@ -85,9 +83,15 @@ fi
 %{_localstatedir}/cache/fscache
 
 %changelog
+* Fri Jul 15 2011 David Howells <dhowells@redhat.com> 0.10-2
+- Downgrade all the culling messages to debug level [RH BZ 660347].
+
 * Fri Jun 18 2010 David Howells <dhowells@redhat.com>
 - Fix the initscript to contain an LSB parseable description.
 - Fix the initscript to return the correct error codes [RH BZ 605631].
+
+* Wed Apr 28 2010 David Howells <dhowells@redhat.com>
+- Fix the Requires line on selinux-policy-base to be >=, not = [RH BZ 723890].
 
 * Fri Apr 23 2010 David Howells <dhowells@redhat.com>
 - The SELinux policies for cachefilesd now live in the selinux-policy RPM, so

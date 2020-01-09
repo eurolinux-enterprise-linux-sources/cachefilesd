@@ -1,5 +1,5 @@
 Name:           cachefilesd
-Version:        0.10.1
+Version:        0.10.2
 Release:        1%{?dist}
 Summary:        CacheFiles userspace management daemon
 Group:          System Environment/Daemons
@@ -11,7 +11,7 @@ BuildRoot:      %{_tmppath}/%{name}-%{version}-root-%(%{__id_u} -n)
 BuildRequires: automake, autoconf
 Requires(post): /sbin/chkconfig, /sbin/service
 Requires(preun): /sbin/chkconfig, /sbin/service
-Requires:       selinux-policy-base = 3.7.19-5
+Requires:       selinux-policy-base >= 3.7.19-5
 
 %description
 The cachefilesd daemon manages the caching files and directory that are
@@ -83,6 +83,15 @@ fi
 %{_localstatedir}/cache/fscache
 
 %changelog
+* Fri Jul 15 2011 David Howells <dhowells@redhat.com>
+- Downgrade all the culling messages to debug level [RH BZ 660347].
+
+* Fri Jun 18 2010 David Howells <dhowells@redhat.com>
+- Fix the initscript to have the appropriate parseable description and exit codes.
+
+* Wed Apr 28 2010 David Howells <dhowells@redhat.com>
+- Fix the Requires line on selinux-policy-base to be >=, not =.
+
 * Fri Apr 23 2010 David Howells <dhowells@redhat.com>
 - The SELinux policies for cachefilesd now live in the selinux-policy RPM, so
   the cachefilesd-selinux RPM is now redundant.
