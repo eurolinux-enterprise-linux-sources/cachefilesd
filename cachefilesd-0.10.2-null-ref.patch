@@ -1,0 +1,33 @@
+Fixing null reference for malformed kernel status output.
+
+Backport from upstream v0.10.6.
+
+commit 37fe3688870a47bd46c25e3feba05430bafebd2e
+Author: John Snow <jsnow@redhat.com>
+Date:   Thu Feb 26 22:09:04 2015 +0000
+
+Fixing null reference for malformed kernel status output.
+
+In certain cases, a NULL may be passed along to string library functions.
+Not anymore!
+
+Signed-off-by: John Snow <jsnow@redhat.com>
+Signed-off-by: David Howells <dhowells@redhat.com>
+---
+diff -up cachefilesd-0.10.2/cachefilesd.c.null-ref cachefilesd-0.10.2/cachefilesd.c
+--- cachefilesd-0.10.2/cachefilesd.c.null-ref	2011-07-18 15:37:20.000000000 +0100
++++ cachefilesd-0.10.2/cachefilesd.c	2016-02-04 14:37:31.377995896 +0000
+@@ -759,8 +759,12 @@ static void read_cache_state(void)
+ 			*next++ = '\0';
+ 
+ 		arg = strchr(tok, '=');
+-		if (arg)
++		if (arg) {
+ 			*arg++ = '\0';
++		} else {
++			debug(0, "Warning: malformed output from kernel, missing arg to [%s]", tok);
++			continue;
++		}
+ 
+ 		if (strcmp(tok, "cull") == 0)
+ 			cull = strtoul(arg, NULL, 0);

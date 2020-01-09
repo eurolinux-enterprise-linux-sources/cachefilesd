@@ -1,11 +1,17 @@
 Name:           cachefilesd
 Version:        0.10.2
-Release:        1%{?dist}
+Release:        3%{?dist}
 Summary:        CacheFiles userspace management daemon
 Group:          System Environment/Daemons
-License:        GPL
+License:        GPL2+
 URL:  		http://people.redhat.com/~dhowells/fscache/
 Source0:        http://people.redhat.com/dhowells/fscache/cachefilesd-%{version}.tar.bz2
+Patch01:	cachefilesd-0.10.2-null-ref.patch
+Patch02:	cachefilesd-0.10.2-cleanup.patch
+Patch03:	cachefilesd-0.10.2-sign-cmp.patch
+Patch04:	cachefilesd-0.10.2-delay-spin.patch
+Patch05:	cachefilesd-0.10.2-suspend-cull.patch
+Patch06:	cachefilesd-0.10.2-service-security.patch
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-root-%(%{__id_u} -n)
 BuildRequires: automake, autoconf
@@ -20,6 +26,12 @@ do persistent caching to the local disk.
 
 %prep
 %setup -q
+%patch01 -p1
+%patch02 -p1
+%patch03 -p1
+%patch04 -p1
+%patch05 -p1
+%patch06 -p1
 
 %build
 %ifarch s390 s390x
@@ -65,7 +77,8 @@ fi
 %postun
 if [ $1 -eq 0 ]; then
 	# Fix up non-standard directory context
-	/sbin/restorecon -R %{_localstatedir}/cache/fscache || :
+	[ -d %{_localstatedir}/cache/fscache ] &&
+	    /sbin/restorecon -R %{_localstatedir}/cache/fscache || :
 fi
 
 %files
@@ -83,6 +96,16 @@ fi
 %{_localstatedir}/cache/fscache
 
 %changelog
+* Thu Mar 17 2016 David Howells <dhowells@redhat.com> 0.10.2-3
+- postuninstall: Only restorecon /var/cache/fscache if it exists (#1316776)
+- Fix bogus dates in changelog
+
+* Thu Feb 4 2016 David Howells <dhowells@redhat.com> 0.10.2-2
+- Note the correct licence.
+- Handle malformed kernel status correctly.
+- Suspend culling when cache space is short and cache objects are pinned (#1109640).
+- Set the security label on the device file only after loading the module (#1066139).
+
 * Fri Jul 15 2011 David Howells <dhowells@redhat.com> 0.10-2
 - Downgrade all the culling messages to debug level [RH BZ 660347].
 
@@ -116,13 +139,13 @@ fi
 * Mon Jul 2 2007 David Howells <dhowells@redhat.com> 0.8-16
 - Use stat64/fstatat64 to avoid EOVERFLOW errors from the kernel on large files.
 
-* Tue Nov 15 2006 David Howells <dhowells@redhat.com> 0.8-15
+* Tue Nov 14 2006 David Howells <dhowells@redhat.com> 0.8-15
 - Made cachefilesd ask the kernel whether cullable objects are in use and omit
   them from the cull table if they are.
 - Made the size of cachefilesd's culling tables configurable.
 - Updated the manual pages.
 
-* Mon Nov 14 2006 David Howells <dhowells@redhat.com> 0.8-14
+* Mon Nov 13 2006 David Howells <dhowells@redhat.com> 0.8-14
 - Documented SELinux interaction.
 
 * Fri Nov 10 2006 David Howells <dhowells@redhat.com> 0.8-11
@@ -154,7 +177,7 @@ fi
 - Added postun and preun rules so cachefilesd is stopped
   and started when the rpm is updated or removed.
 
-* Tue Aug  7 2006 Jesse Keating <jkeating@redhat.com> 0.4-2
+* Tue Aug  8 2006 Jesse Keating <jkeating@redhat.com> 0.4-2
 - require /sbin/chkconfig not /usr/bin/chkconfig
 
 * Tue Aug  1 2006 David Howells <dhowells@redhat.com> 0.4-1

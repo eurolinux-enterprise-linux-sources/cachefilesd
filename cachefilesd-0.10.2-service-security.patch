@@ -1,0 +1,33 @@
+Set the security label on the cachefiles control device file after
+loading the module rather than before so that the device file can be
+expected to exist.
+
+RH-Bugzilla: 1066139
+---
+diff -up cachefilesd-0.10.2/cachefilesd.initd.service-security cachefilesd-0.10.2/cachefilesd.initd
+--- cachefilesd-0.10.2/cachefilesd.initd.service-security	2016-02-04 15:14:42.113164224 +0000
++++ cachefilesd-0.10.2/cachefilesd.initd	2016-02-04 15:14:53.039258155 +0000
+@@ -55,11 +55,6 @@ start() {
+ 
+     echo -n $"Starting $PROG: "
+ 
+-    # Set security contexts
+-    /sbin/restorecon /sbin/cachefilesd || return 1
+-    /sbin/restorecon /dev/cachefiles || return 1
+-    /sbin/restorecon -R `awk -- '/^dir/ { print $2 }' $CONFFILE` || return 1
+-
+     # Load the cachefiles module if needed
+     [ -x "$MODPROBE" ] && {
+ 	if ! /sbin/lsmod | grep cachefiles > /dev/null ; then
+@@ -67,6 +62,11 @@ start() {
+ 	fi
+     }
+ 
++    # Set security contexts
++    /sbin/restorecon /sbin/cachefilesd || return 1
++    /sbin/restorecon /dev/cachefiles || return 1
++    /sbin/restorecon -R `awk -- '/^dir/ { print $2 }' $CONFFILE` || return 1
++
+     # Start daemon.
+     daemon --pidfile=$PIDFILE $PROG ${OPTIONS} 2>/dev/null
+     RETVAL=$?

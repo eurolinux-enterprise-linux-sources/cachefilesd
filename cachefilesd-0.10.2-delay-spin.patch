@@ -1,0 +1,77 @@
+cachefilesd can spin when disk space is short.
+
+Backported from upstream v0.10.6.
+
+commit ce353f5b6b5b64e7bc39187f1b40a3f73d8d22b2
+Author: NeilBrown <neilb@suse.de>
+Date:   Tue Feb 4 15:47:00 2014 +1100
+
+When cachefilesd finds that it needs to cull, but that culling doesn't
+achieve anything, it sets an alarm to wake it in 30 seconds to try again.
+But as read_cache_state() will detect that culling is still needed, it will
+immediately try again anyway.
+
+This results in 100% cpu usage of no value.
+
+This patch causes culling to be blocked until the 30 second alarm goes off.
+
+It also changes the test to decide whether to enter poll() after blocking
+signals to test exactly those values that might be changed by a signal.
+Testing these is important, testing anything else is pointless.
+
+Signed-off-by: NeilBrown <neilb@suse.de>
+Signed-off-by: David Howells <dhowells@redhat.com>
+Reviewed-by: Steve Dickson <steved@redhat.com>
+Reviewed-by: John Snow <jsnow@redhat.com>
+RH-Bugzilla: 1109640
+---
+diff -up cachefilesd-0.10.2/cachefilesd.c.delay-spin cachefilesd-0.10.2/cachefilesd.c
+--- cachefilesd-0.10.2/cachefilesd.c.delay-spin	2016-02-04 14:43:20.345996228 +0000
++++ cachefilesd-0.10.2/cachefilesd.c	2016-02-04 14:44:38.745669822 +0000
+@@ -99,6 +99,7 @@ static struct object **cullready;
+ static unsigned nr_in_build_table;
+ static unsigned nr_in_ready_table;
+ static int ncullable;
++static bool cull_delayed;
+ 
+ 
+ static const char *configfile = "/etc/cachefilesd.conf";
+@@ -246,6 +247,7 @@ static void sigio(int sig)
+ static void sigalrm(int sig)
+ {
+ 	jumpstart_scan = true;
++	cull_delayed = false;
+ }
+ 
+ /*****************************************************************************/
+@@ -608,11 +610,11 @@ static void cachefilesd(void)
+ 
+ 		/* sleep without racing on reap and cull with the signal
+ 		 * handlers */
+-		if (!scan && !reap && !cull) {
++		if (!scan && !reap && !(cull && !cull_delayed)) {
+ 			if (sigprocmask(SIG_BLOCK, &sigs, &osigs) < 0)
+ 				oserror("Unable to block signals");
+ 
+-			if (!reap && !cull) {
++			if (!reap && !stop && !jumpstart_scan) {
+ 				if (ppoll(pollfds, 1, NULL, &osigs) < 0 &&
+ 				    errno != EINTR)
+ 					oserror("Unable to suspend process");
+@@ -639,7 +641,7 @@ static void cachefilesd(void)
+ 			if (cull) {
+ 				if (nr_in_ready_table > 0)
+ 					cull_objects();
+-				else if (nr_in_build_table == 0)
++				else if (nr_in_build_table == 0 && !cull_delayed)
+ 					jumpstart_scan = true;
+ 			}
+ 
+@@ -1359,6 +1361,7 @@ static void decant_cull_table(void)
+ 
+ 	/* if nothing there, scan again in a short while */
+ 	if (nr_in_build_table == 0) {
++		cull_delayed = true;
+ 		signal(SIGALRM, sigalrm);
+ 		alarm(30);
+ 		return;
