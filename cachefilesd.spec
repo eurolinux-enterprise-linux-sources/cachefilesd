@@ -2,7 +2,7 @@
 
 Name:		cachefilesd
 Version:	0.10.5
-Release:	4%{?dist}%{?buildid}
+Release:	6%{?dist}%{?buildid}
 Summary:	CacheFiles user-space management daemon
 Group:		System Environment/Daemons
 License:	GPLv2
@@ -87,6 +87,12 @@ fi
 %{_localstatedir}/cache/fscache
 
 %changelog
+* Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 0.10.5-6
+- Mass rebuild 2014-01-24
+
+* Fri Dec 27 2013 Daniel Mach <dmach@redhat.com> - 0.10.5-5
+- Mass rebuild 2013-12-27
+
 * Wed Feb 13 2013 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 0.10.5-4
 - Rebuilt for https://fedoraproject.org/wiki/Fedora_19_Mass_Rebuild
 
