@@ -1,63 +1,79 @@
 # % define buildid .local
 
 Name:		cachefilesd
-Version:	0.10.8
+Version:	0.10.5
 Release:	1%{?dist}%{?buildid}
 Summary:	CacheFiles user-space management daemon
 Group:		System Environment/Daemons
-License:	GPLv2+
+License:	GPLv2
 URL:		http://people.redhat.com/~dhowells/fscache/
 Source0:	http://people.redhat.com/dhowells/fscache/cachefilesd-%{version}.tar.bz2
 
+BuildRoot: %{_tmppath}/%{name}-%{version}-root-%(%{__id_u} -n)
 BuildRequires: systemd-units
 Requires(post): systemd-units
 Requires(preun): systemd-units
 Requires(postun): systemd-units
 Requires: selinux-policy-base >= 3.7.19-5
 
-%define _hardened_build 1
-
 %description
 The cachefilesd daemon manages the caching files and directory that are that
 are used by network file systems such a AFS and NFS to do persistent caching to
 the local disk.
 
-%global docdir %{_docdir}/cachefilesd
-
 %prep
 %setup -q
 
 %build
-make all \
-	ETCDIR=%{_sysconfdir} \
-	SBINDIR=%{_sbindir} \
-	MANDIR=%{_mandir} \
-	CFLAGS="-Wall -Werror $RPM_OPT_FLAGS $RPM_LD_FLAGS $ARCH_OPT_FLAGS"
+%ifarch s390 s390x
+PIE="-fPIE"
+%else
+PIE="-fpie"
+%endif
+export PIE
+CFLAGS="`echo $RPM_OPT_FLAGS $ARCH_OPT_FLAGS $PIE`"
+
+make all CFLAGS="$CFLAGS"
 
 %install
-mkdir -p %{buildroot}%{_sbindir}
+rm -rf %{buildroot}
+mkdir -p %{buildroot}/sbin
 mkdir -p %{buildroot}%{_unitdir}
 mkdir -p %{buildroot}%{_mandir}/{man5,man8}
+mkdir -p %{buildroot}/usr/share/doc/%{name}-%{version}
+mkdir -p %{buildroot}/usr/share/doc/%{name}-selinux-%{version}
 mkdir -p %{buildroot}%{_localstatedir}/cache/fscache
-make DESTDIR=%{buildroot} install \
-	ETCDIR=%{_sysconfdir} \
-	SBINDIR=%{_sbindir} \
-	MANDIR=%{_mandir} \
-	CFLAGS="-Wall $RPM_OPT_FLAGS -Werror"
+make DESTDIR=%{buildroot} install
 
 install -m 644 cachefilesd.conf %{buildroot}%{_sysconfdir}
 install -m 644 cachefilesd.service %{buildroot}%{_unitdir}/cachefilesd.service
+install -m 644 selinux/move-cache.txt %{buildroot}/usr/share/doc/%{name}-%{version}/
+
+%clean
+rm -rf $RPM_BUILD_ROOT
 
 %post
-%systemd_post cachefilesd.service
+if [ $1 -eq 1 ] ; then
+    # Initial installation
+    /bin/systemctl daemon-reload >/dev/null 2>&1 || :
+fi
 
 %preun
-%systemd_preun cachefilesd.service
+if [ $1 -eq 0 ] ; then
+    # Package removal, not upgrade
+    /bin/systemctl --no-reload disable cachefilesd.service > /dev/null 2>&1 || :
+    /bin/systemctl stop cachefilesd.service > /dev/null 2>&1 || :
+fi
 
 %postun
-%systemd_postun_with_restart cachefilesd.service
+/bin/systemctl daemon-reload >/dev/null 2>&1 || :
+if [ $1 -ge 1 ] ; then
+    # Package upgrade, not uninstall
+    /bin/systemctl try-restart cachefilesd.service >/dev/null 2>&1 || :
+fi
 
 %files
+%defattr(-,root,root)
 %doc README
 %doc howto.txt
 %doc selinux/move-cache.txt
@@ -65,26 +81,12 @@ install -m 644 cachefilesd.service %{buildroot}%{_unitdir}/cachefilesd.service
 %doc selinux/*.if
 %doc selinux/*.te
 %config(noreplace) %{_sysconfdir}/cachefilesd.conf
-%{_sbindir}/*
+/sbin/*
 %{_unitdir}/*
 %{_mandir}/*/*
 %{_localstatedir}/cache/fscache
 
 %changelog
-* Wed Feb 17 2016 David Howells <dhowells@redhat.com> 0.10.8-1
-- Use systemd interaction macros in specfile installation sections [RH BZ 850053].
-- Fix the service file to use /usr/sbin/ rather than /sbin/.
-- Turn on RELRO and PIE build hardening in RPM builds.
-
-* Wed Feb 3 2016 David Howells <dhowells@redhat.com> 0.10.7-1
-- Call setgroups() before calling setuid() (caught by rpmlint).
-
-* Wed Feb 3 2016 David Howells <dhowells@redhat.com> 0.10.6-1
-- Note the correct licence.
-- Handle malformed kernel status correctly.
-- Permit culling to be disabled on the command line with the -N flag.
-- Suspend culling when cache space is short and cache objects are pinned.
-
 * Tue Dec 6 2011 David Howells <dhowells@redhat.com> 0.10.5-1
 - Fix systemd service data according to review comments [RH BZ 754811].
 
@@ -130,13 +132,13 @@ install -m 644 cachefilesd.service %{buildroot}%{_unitdir}/cachefilesd.service
 * Mon Jul 2 2007 David Howells <dhowells@redhat.com> 0.8-16
 - Use stat64/fstatat64 to avoid EOVERFLOW errors from the kernel on large files.
 
-* Tue Nov 14 2006 David Howells <dhowells@redhat.com> 0.8-15
+* Tue Nov 15 2006 David Howells <dhowells@redhat.com> 0.8-15
 - Made cachefilesd ask the kernel whether cullable objects are in use and omit
   them from the cull table if they are.
 - Made the size of cachefilesd's culling tables configurable.
 - Updated the manual pages.
 
-* Mon Nov 13 2006 David Howells <dhowells@redhat.com> 0.8-14
+* Mon Nov 14 2006 David Howells <dhowells@redhat.com> 0.8-14
 - Documented SELinux interaction.
 
 * Fri Nov 10 2006 David Howells <dhowells@redhat.com> 0.8-11
@@ -168,7 +170,7 @@ install -m 644 cachefilesd.service %{buildroot}%{_unitdir}/cachefilesd.service
 - Added postun and preun rules so cachefilesd is stopped
   and started when the rpm is updated or removed.
 
-* Tue Aug  8 2006 Jesse Keating <jkeating@redhat.com> 0.4-2
+* Tue Aug  7 2006 Jesse Keating <jkeating@redhat.com> 0.4-2
 - require /sbin/chkconfig not /usr/bin/chkconfig
 
 * Tue Aug  1 2006 David Howells <dhowells@redhat.com> 0.4-1

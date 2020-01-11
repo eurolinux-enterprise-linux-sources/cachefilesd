@@ -27,11 +27,10 @@
  * NUL characters are cause for error
  */
 
-#define CACHEFILESD_VERSION "0.10.7"
+#define CACHEFILESD_VERSION "0.10.2"
 
 #define _GNU_SOURCE
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,8 +45,6 @@
 #include <dirent.h>
 #include <time.h>
 #include <poll.h>
-#include <limits.h>
-#include <grp.h>
 #include <sys/inotify.h>
 #include <sys/time.h>
 #include <sys/vfs.h>
@@ -68,9 +65,9 @@ struct object {
 	DIR		*dir;		/* this object's directory (or NULL for data obj) */
 	ino_t		ino;		/* inode number of this object */
 	int		usage;		/* number of users of this object */
-	bool		empty;		/* T if directory empty */
-	bool		new;		/* T if object new */
-	bool		cullable;	/* T if object now cullable */
+	char		empty;		/* T if directory empty */
+	char		new;		/* T if object new */
+	char		cullable;	/* T if object now cullable */
 	objtype_t	type;		/* type of object */
 	time_t		atime;		/* last access time on this object */
 	char		name[1];	/* name of this object */
@@ -84,11 +81,11 @@ static struct object root = {
 };
 
 static int nobjects = 1;
-static int nopendir;
+static int nopendir = 0;
 
 /* current scan point */
-static struct object *scan_cursor;
-static bool scan_signalled, stop_signalled, reap_signalled;
+static struct object *scan = &root;
+static int jumpstart_scan = 0;
 
 /* ranked order of cullable objects
  * - we have two tables: one we're building and one that's full of ready to be
@@ -98,13 +95,9 @@ static unsigned culltable_size = 4096;
 static struct object **cullbuild;
 static struct object **cullready;
 
-static unsigned nr_in_build_table;
-static unsigned nr_in_ready_table;
-static int ncullable;
-static bool kernel_wants_cull;
-static bool have_nr_releases;
-static unsigned long long f_released_since_last_scan;
-static unsigned long long b_released_since_last_scan;
+static int oldest_build = -1;
+static int oldest_ready = -1;
+static int ncullable = 0;
 
 
 static const char *configfile = "/etc/cachefilesd.conf";
@@ -113,15 +106,10 @@ static const char *procfile = "/proc/fs/cachefiles";
 static const char *pidfile = "/var/run/cachefilesd.pid";
 static char *cacheroot, *graveyardpath;
 
-static bool culling_disabled;
-static bool xnolog, xopenedlog;
-static int xdebug;
+static int xdebug, xnolog, xopenedlog;
+static int stop, reap, cull, nocull; //, statecheck;
 static int graveyardfd;
 static unsigned long long brun, bcull, bstop, frun, fcull, fstop;
-static unsigned long long b_resume_threshold = ULLONG_MAX;
-static unsigned long long f_resume_threshold = 5;
-
-static const gid_t group_list[0];
 
 #define cachefd 3
 
@@ -166,7 +154,7 @@ void __error(int excode, const char *fmt, ...)
 	else {
 		if (!xopenedlog) {
 			openlog("cachefilesd", LOG_PID, LOG_DAEMON);
-			xopenedlog = true;
+			xopenedlog = 1;
 		}
 
 		va_start(va, fmt);
@@ -198,7 +186,7 @@ void __message(int dlevel, int level, const char *fmt, ...)
 		else if (!xnolog) {
 			if (!xopenedlog) {
 				openlog("cachefilesd", LOG_PID, LOG_DAEMON);
-				xopenedlog = true;
+				xopenedlog = 1;
 			}
 
 			va_start(va, fmt);
@@ -221,8 +209,7 @@ static void reap_graveyard_aux(const char *dirname);
 static void read_cache_state(void);
 static int is_object_in_use(const char *filename);
 static void cull_file(const char *filename);
-static void begin_building_cull_table(void);
-static bool build_cull_table(void);
+static void build_cull_table(void);
 static void decant_cull_table(void);
 static void insert_into_cull_table(struct object *object);
 static void put_object(struct object *object);
@@ -238,7 +225,7 @@ static void cull_objects(void);
  */
 static void sigterm(int sig)
 {
-	stop_signalled = true;
+	stop = 1;
 }
 
 /*****************************************************************************/
@@ -247,7 +234,7 @@ static void sigterm(int sig)
  */
 static void sigio(int sig)
 {
-	reap_signalled = true;
+	reap = 1;
 }
 
 /*****************************************************************************/
@@ -256,7 +243,7 @@ static void sigio(int sig)
  */
 static void sigalrm(int sig)
 {
-	scan_signalled = true;
+	jumpstart_scan = 1;
 }
 
 /*****************************************************************************/
@@ -289,8 +276,7 @@ int main(int argc, char *argv[])
 	FILE *config;
 	char *line, *cp;
 	long page_size;
-	int _cachefd, nullfd, opt, loop, open_max;
-	bool nodaemon = false;
+	int _cachefd, nullfd, opt, loop, open_max, nodaemon = 0;
 
 	/* handle help request */
 	if (argc == 2 && strcmp(argv[1], "--help") == 0)
@@ -300,7 +286,7 @@ int main(int argc, char *argv[])
 		version();
 
 	/* parse the arguments */
-	while (opt = getopt(argc, argv, "dsnNf:p:v"),
+	while (opt = getopt(argc, argv, "dsnf:p:v"),
 	       opt != EOF
 	       ) {
 		switch (opt) {
@@ -311,17 +297,12 @@ int main(int argc, char *argv[])
 
 		case 's':
 			/* disable syslog writing */
-			xnolog = true;
+			xnolog = 1;
 			break;
 
 		case 'n':
 			/* don't daemonise */
-			nodaemon = true;
-			break;
-
-		case 'N':
-			/* disable culling */
-			culling_disabled = true;
+			nodaemon = 1;
 			break;
 
 		case 'f':
@@ -353,9 +334,6 @@ int main(int argc, char *argv[])
 		oserror("Unable to get max open files");
 
 	/* become owned by root */
-	if (setgroups(sizeof(group_list) / sizeof(gid_t), group_list) < 0)
-		oserror("Unable to clear the supplementary groups");
-
 	if (setresuid(0, 0, 0) < 0)
 		oserror("Unable to set UID to 0");
 
@@ -432,7 +410,7 @@ int main(int argc, char *argv[])
 		/*  allow culling to be disabled */
 		if (memcmp(cp, "nocull", 6) == 0 &&
 		    (!cp[6] || isspace(cp[6]))) {
-			culling_disabled = true;
+			nocull = 1;
 		}
 
 		/* note the cull table size command */
@@ -448,44 +426,6 @@ int main(int argc, char *argv[])
 			if (cts < 12 || cts > 20)
 				cfgerror("Log2 of cull table size must be 12 <= N <= 20");
 			culltable_size = 1 << cts;
-			continue;
-		}
-
-		/* Note the suspension resume released file count thresholds
-		 * ("-" to disable a threshold).
-		 */
-		if (memcmp(cp, "resume_thresholds", 18) == 0 && isspace(cp[18])) {
-			unsigned long long b_thresh, f_thresh;
-			char *sp;
-
-			for (sp = cp + 18; isspace(*sp); sp++) {;}
-
-			if (*sp == '-') {
-				sp++;
-				b_thresh = ULLONG_MAX;
-			} else {
-				b_thresh = strtoul(sp, &sp, 10);
-			}
-
-			if (!*sp || !isspace(*sp))
-				cfgerror("Error parsing resume threshold (blocks)");
-			if (b_thresh == 0)
-				cfgerror("Invalid resume threshold (blocks)");
-			for (; isspace(*sp); sp++) {;}
-
-			if (*sp == '-') {
-				sp++;
-				f_thresh = ULLONG_MAX;
-			} else {
-				f_thresh = strtoul(sp, &sp, 10);
-				if (*sp)
-					cfgerror("Error parsing resume threshold (files)");
-				if (f_thresh == 0)
-					cfgerror("Invalid resume threshold (files)");
-			}
-
-			b_resume_threshold = b_thresh;
-			f_resume_threshold = f_thresh;
 			continue;
 		}
 
@@ -529,7 +469,7 @@ int main(int argc, char *argv[])
 		oserror("Unable to close %s", configfile);
 
 	/* allocate the cull tables */
-	if (!culling_disabled) {
+	if (!nocull) {
 		cullbuild = calloc(culltable_size, sizeof(cullbuild[0]));
 		if (!cullbuild)
 			oserror("calloc");
@@ -551,7 +491,7 @@ int main(int argc, char *argv[])
 	/* set up a connection to syslog whilst we still can (the bind command
 	 * will give us our own namespace with no /dev/log */
 	openlog("cachefilesd", LOG_PID, LOG_DAEMON);
-	xopenedlog = true;
+	xopenedlog = 1;
 	info("About to bind cache");
 
 	/* now issue the bind command */
@@ -619,10 +559,10 @@ static void open_cache(void)
 	if (fstatfs(graveyardfd, &sfs) < 0)
 		oserror("Unable to stat cache filesystem");
 
-	if (sfs.f_bsize  + 1 == 0 ||
-	    sfs.f_blocks + 1 == 0 ||
-	    sfs.f_bfree  + 1 == 0 ||
-	    sfs.f_bavail + 1 == 0)
+	if (sfs.f_bsize == -1 ||
+	    sfs.f_blocks == -1 ||
+	    sfs.f_bfree == -1 ||
+	    sfs.f_bavail == -1)
 		error("Backing filesystem returns unusable statistics through fstatfs()");
 }
 
@@ -633,8 +573,6 @@ static void open_cache(void)
 static void cachefilesd(void)
 {
 	sigset_t sigs, osigs;
-	bool scanning_suspended = false;
-	bool scan_in_progress = false;
 
 	struct pollfd pollfds[1] = {
 		[0] = {
@@ -648,14 +586,13 @@ static void cachefilesd(void)
 	/* open the cache directories */
 	open_cache();
 
-	/* We need to be able to disable signals that we need to check for
-	 * before calling poll so that we don't race and miss something.
+	/* we need to disable I/O and termination signals so they're only
+	 * caught at appropriate times
 	 */
 	sigemptyset(&sigs);
 	sigaddset(&sigs, SIGIO);
 	sigaddset(&sigs, SIGINT);
 	sigaddset(&sigs, SIGTERM);
-	sigaddset(&sigs, SIGALRM);
 
 	signal(SIGTERM, sigterm);
 	signal(SIGINT, sigterm);
@@ -663,81 +600,16 @@ static void cachefilesd(void)
 	/* check the graveyard for graves */
 	reap_graveyard();
 
-	while (!stop_signalled) {
-		bool do_cull = false;
-
-		debug(3, "Loop %sbuild=%d ready=%d susp=%u scan=%u",
-		      culling_disabled ? "NOCULL " : "",
-		      nr_in_build_table, nr_in_ready_table,
-		      scanning_suspended, scan_in_progress);
-
+	while (!stop) {
 		read_cache_state();
 
-		if (!culling_disabled) {
-			/* Determine if we're going to need to start a new scan
-			 * to refill the cull table.  We want to do this if the
-			 * secondary cull table is less than half full - but
-			 * overriding that, we don't want to do this if we know
-			 * there's insufficient cullables to make it worth
-			 * while.
-			 */
-			if (!scan_in_progress) {
-				bool begin_scan = false;
-
-				debug(1, "Consider scan %d/%d",
-				      nr_in_build_table, culltable_size / 2);
-
-				if (nr_in_build_table < culltable_size / 2) {
-					debug(1, "Want to scan");
-					begin_scan = true;
-				}
-
-				if (begin_scan && scanning_suspended) {
-					debug(1, "Scanning suspended");
-					if (have_nr_releases) {
-						if (f_released_since_last_scan <
-						    f_resume_threshold &&
-						    b_released_since_last_scan <
-						    b_resume_threshold)
-							begin_scan = false;
-					} else {
-						begin_scan = scan_signalled;
-					}
-				}
-
-				if (begin_scan) {
-					debug(1, "Beginning a scan");
-					begin_building_cull_table();
-					scan_in_progress = true;
-					scanning_suspended = false;
-					scan_signalled = false;
-					f_released_since_last_scan = 0;
-					b_released_since_last_scan = 0;
-				}
-			}
-
-			/* Determine if there's anything we can actually cull yet if
-			 * the kernel is calling for space.
-			 */
-			if (kernel_wants_cull) {
-				debug(1, "Want to cull");
-				if (nr_in_ready_table > 0)
-					do_cull = true;
-			}
-		}
-
-		/* We block the signals across the checks for reap, cull and
-		 * scan initiation before polling so that we sleep without
-		 * racing against the signal handlers.
-		 */
-		if (!scan_in_progress && !reap_signalled && !do_cull) {
+		/* sleep without racing on reap and cull with the signal
+		 * handlers */
+		if (!scan && !reap && !cull) {
 			if (sigprocmask(SIG_BLOCK, &sigs, &osigs) < 0)
 				oserror("Unable to block signals");
 
-			if (!reap_signalled &&
-			    !stop_signalled &&
-			    !scan_signalled) {
-				debug(1, "Poll");
+			if (!reap && !cull) {
 				if (ppoll(pollfds, 1, NULL, &osigs) < 0 &&
 				    errno != EINTR)
 					oserror("Unable to suspend process");
@@ -745,44 +617,37 @@ static void cachefilesd(void)
 
 			if (sigprocmask(SIG_UNBLOCK, &sigs, NULL) < 0)
 				oserror("Unable to unblock signals");
-			continue;
+
+			read_cache_state();
 		}
 
-		if (!culling_disabled) {
-			if (do_cull)
-				cull_objects();
-
-			if (scan_in_progress) {
-				scan_in_progress = build_cull_table();
-				if (!scan_in_progress) {
-					/* Scan complete.
-					 *
-					 * If the scan didn't produce a full
-					 * table then don't repeat the scan
-					 * until something gets released by the
-					 * kernel.
-					 */
-					if (nr_in_build_table < culltable_size) {
-						debug(1, "Suspend scanning");
-						scanning_suspended = true;
-						if (!have_nr_releases) {
-							signal(SIGALRM, sigalrm);
-							alarm(30);
-						}
-					}
+		if (nocull) {
+			cull = 0;
+		} else {
+			if (jumpstart_scan) {
+				jumpstart_scan = 0;
+				if (!stop && !scan) {
+					debug(1, "Refilling cull table");
+					root.usage++;
+					scan = &root;
 				}
 			}
 
-			if (!scan_in_progress) {
-				if (nr_in_ready_table <= culltable_size / 2 + 2 &&
-				    nr_in_build_table > 0) {
-					debug(1, "Decant");
-					decant_cull_table();
-				}
+			if (cull) {
+				if (oldest_ready >= 0)
+					cull_objects();
+				else if (oldest_build < 0)
+					jumpstart_scan = 1;
 			}
+
+			if (scan)
+				build_cull_table();
+
+			if (!scan && oldest_ready < 0 && oldest_build >= 0)
+				decant_cull_table();
 		}
 
-		if (reap_signalled)
+		if (reap)
 			reap_graveyard();
 	}
 
@@ -797,7 +662,7 @@ static void cachefilesd(void)
 static void reap_graveyard(void)
 {
 	/* set a one-shot notification to catch more graves appearing */
-	reap_signalled = false;
+	reap = 0;
 	signal(SIGIO, sigio);
 	if (fcntl(graveyardfd, F_NOTIFY, DN_CREATE) < 0)
 		oserror("unable to set notification on graveyard");
@@ -812,9 +677,8 @@ static void reap_graveyard(void)
 static void reap_graveyard_aux(const char *dirname)
 {
 	struct dirent dirent, *de;
-	bool deleted;
 	DIR *dir;
-	int ret;
+	int deleted, ret;
 
 	if (chdir(dirname) < 0)
 		oserror("chdir failed");
@@ -827,7 +691,7 @@ static void reap_graveyard_aux(const char *dirname)
 		/* removing directory entries may cause us to skip when reading
 		 * them */
 		rewinddir(dir);
-		deleted = false;
+		deleted = 0;
 
 		while (ret = readdir_r(dir, &dirent, &de),
 		       ret == 0 && de != NULL
@@ -841,7 +705,7 @@ static void reap_graveyard_aux(const char *dirname)
 					continue;
 			}
 
-			deleted = true;
+			deleted = 1;
 
 			/* attempt to unlink non-directory files */
 			if (dirent.d_type != DT_DIR) {
@@ -888,8 +752,6 @@ static void read_cache_state(void)
 		oserror("Unable to read cache state");
 	buffer[n] = '\0';
 
-	debug(3, "KERNEL: %s", buffer);
-
 	tok = buffer;
 	do {
 		next = strpbrk(tok, " \t");
@@ -897,34 +759,23 @@ static void read_cache_state(void)
 			*next++ = '\0';
 
 		arg = strchr(tok, '=');
-		if (arg) {
+		if (arg)
 			*arg++ = '\0';
-		} else {
-			debug(0, "Warning: malformed output from kernel, missing arg to [%s]", tok);
-			continue;
-		}
 
-		if (strcmp(tok, "cull") == 0) {
-			kernel_wants_cull = (strtoul(arg, NULL, 0) != 0);
-		} else if (strcmp(tok, "brun") == 0) {
+		if (strcmp(tok, "cull") == 0)
+			cull = strtoul(arg, NULL, 0);
+		else if (strcmp(tok, "brun") == 0)
 			brun = strtoull(arg, NULL, 16);
-		} else if (strcmp(tok, "bcull") == 0) {
+		else if (strcmp(tok, "bcull") == 0)
 			bcull = strtoull(arg, NULL, 16);
-		} else if (strcmp(tok, "bstop") == 0) {
+		else if (strcmp(tok, "bstop") == 0)
 			bstop = strtoull(arg, NULL, 16);
-		} else if (strcmp(tok, "frun") == 0) {
+		else if (strcmp(tok, "frun") == 0)
 			frun = strtoull(arg, NULL, 16);
-		} else if (strcmp(tok, "fcull") == 0) {
+		else if (strcmp(tok, "fcull") == 0)
 			fcull = strtoull(arg, NULL, 16);
-		} else if (strcmp(tok, "fstop") == 0) {
+		else if (strcmp(tok, "fstop") == 0)
 			fstop = strtoull(arg, NULL, 16);
-		} else if (strcmp(tok, "breleased") == 0) {
-			b_released_since_last_scan += strtoull(arg, NULL, 16);
-			have_nr_releases = true;
-		} else if (strcmp(tok, "freleased") == 0) {
-			f_released_since_last_scan += strtoull(arg, NULL, 16);
-			have_nr_releases = true;
-		}
 
 	} while ((tok = next));
 }
@@ -1003,7 +854,7 @@ static struct object *create_object(struct object *parent,
 		oserror("Unable to alloc object");
 
 	object->usage = 1;
-	object->new = true;
+	object->new = 1;
 
 	object->ino = st->st_ino;
 	object->atime = st->st_atime;
@@ -1133,21 +984,21 @@ static void insert_into_cull_table(struct object *object)
 		error("NULL object pointer");
 
 	/* just insert if table is empty */
-	if (nr_in_build_table == 0) {
+	if (oldest_build == -1) {
 		object->usage++;
+		oldest_build = 0;
 		cullbuild[0] = object;
-		nr_in_build_table++;
 		return;
 	}
 
 	/* insert somewhere if table is not full */
-	if (nr_in_build_table < culltable_size) {
+	if (oldest_build < culltable_size - 1) {
 		object->usage++;
+		oldest_build++;
 
 		/* just insert at end if new oldest object */
-		if (object->atime <= cullbuild[nr_in_build_table - 1]->atime) {
-			cullbuild[nr_in_build_table] = object;
-			nr_in_build_table++;
+		if (object->atime <= cullbuild[oldest_build - 1]->atime) {
+			cullbuild[oldest_build] = object;
 			return;
 		}
 
@@ -1155,27 +1006,25 @@ static void insert_into_cull_table(struct object *object)
 		if (object->atime > cullbuild[0]->atime) {
 			memmove(&cullbuild[1],
 				&cullbuild[0],
-				nr_in_build_table * sizeof(cullbuild[0]));
+				oldest_build * sizeof(cullbuild[0]));
 
 			cullbuild[0] = object;
-			nr_in_build_table++;
 			return;
 		}
 
 		/* if only two objects in list then insert between them */
-		if (nr_in_build_table == 2) {
+		if (oldest_build == 2) {
 			cullbuild[2] = cullbuild[1];
 			cullbuild[1] = object;
-			nr_in_build_table++;
 			return;
 		}
 
 		/* insert somewhere in between front and back elements
-		 * of a three-plus object list
+		 * of a three object list
 		 * - oldest_build == #objects_currently_in_list
 		 */
 		y = 1;
-		o = nr_in_build_table - 1;
+		o = oldest_build - 1;
 
 		do {
 			m = (y + o) / 2;
@@ -1189,15 +1038,14 @@ static void insert_into_cull_table(struct object *object)
 
 		memmove(&cullbuild[y + 1],
 			&cullbuild[y],
-			(nr_in_build_table - y) * sizeof(cullbuild[0]));
+			(oldest_build - y) * sizeof(cullbuild[0]));
 
 		cullbuild[y] = object;
-		nr_in_build_table++;
 		return;
 	}
 
 	/* if table is full then insert only if older than newest */
-	if (nr_in_build_table > culltable_size)
+	if (oldest_build > culltable_size - 1)
 		error("Cull table overfull");
 
 	if (object->atime >= cullbuild[0]->atime)
@@ -1257,32 +1105,19 @@ static void insert_into_cull_table(struct object *object)
 
 /*****************************************************************************/
 /*
- * Begin a scan to build a cull table.
+ * do the next step in building up the cull table
  */
-static void begin_building_cull_table(void)
-{
-	debug(1, "Refilling cull table");
-	root.usage++;
-	scan_cursor = &root;
-}
-
-/*****************************************************************************/
-/*
- * Do the next step in building up the cull table.  Returns false upon
- * completion of a scan.
- */
-static bool build_cull_table(void)
+static void build_cull_table(void)
 {
 	struct dirent dirent, *de;
 	struct object *curr, *child;
 	struct stat64 st;
-	unsigned loop;
-	int fd;
+	int loop, fd;
 
-	curr = scan_cursor;
+	curr = scan;
 
 	if (!curr->dir) {
-		curr->empty = true;
+		curr->empty = 1;
 
 		fd = openat(dirfd(curr->parent->dir), curr->name, O_DIRECTORY);
 		if (fd < 0) {
@@ -1355,7 +1190,7 @@ next:
 	if (!child && errno == ENOENT)
 		goto next;
 
-	curr->empty = false;
+	curr->empty = 0;
 
 	if (!child)
 		oserror("Unable to create object");
@@ -1378,41 +1213,45 @@ next:
 				goto next;
 			}
 
-			for (loop = 0; loop < nr_in_ready_table; loop++)
+			for (loop = 0; loop <= oldest_ready; loop++)
 				if (cullready[loop] == child)
 					break;
 
-			if (loop == nr_in_ready_table - 1) {
+			if (loop == oldest_ready) {
 				/* child was oldest object */
-				cullready[--nr_in_ready_table] = (void *)(0x6b000000 | __LINE__);
+				cullready[oldest_ready] = (void *)(0x6b000000 | __LINE__);
+				oldest_ready--;
 				put_object(child);
 				goto removed;
 			}
-			else if (loop < nr_in_ready_table - 1) {
+			else if (loop < oldest_ready) {
 				/* child was somewhere in between */
 				memmove(&cullready[loop],
 					&cullready[loop + 1],
-					(nr_in_ready_table - (loop + 1)) * sizeof(cullready[0]));
-				cullready[--nr_in_ready_table] = (void *)(0x6b000000 | __LINE__);
+					(oldest_ready - loop) * sizeof(cullready[0]));
+				cullready[oldest_ready] = (void *)(0x6b000000 | __LINE__);
+				oldest_ready--;
 				put_object(child);
 				goto removed;
 			}
 
-			for (loop = 0; loop < nr_in_build_table; loop++)
+			for (loop = 0; loop <= oldest_build; loop++)
 				if (cullbuild[loop] == child)
 					break;
 
-			if (loop == nr_in_build_table - 1) {
+			if (loop == oldest_build) {
 				/* child was oldest object */
-				cullbuild[--nr_in_build_table] = (void *)(0x6b000000 | __LINE__);
+				cullbuild[oldest_build] = (void *)(0x6b000000 | __LINE__);
+				oldest_build--;
 				put_object(child);
 			}
-			else if (loop < nr_in_build_table - 1) {
+			else if (loop < oldest_build) {
 				/* child was somewhere in between */
 				memmove(&cullbuild[loop],
 					&cullbuild[loop + 1],
-					(nr_in_build_table - (loop + 1)) * sizeof(cullbuild[0]));
-				cullbuild[--nr_in_build_table] = (void *)(0x6b000000 | __LINE__);
+					(oldest_build - loop) * sizeof(cullbuild[0]));
+				cullbuild[oldest_build] = (void *)(0x6b000000 | __LINE__);
+				oldest_build--;
 				put_object(child);
 			}
 
@@ -1423,7 +1262,7 @@ next:
 		/* add objects that aren't in use to the cull table */
 		if (!is_object_in_use(dirent.d_name)) {
 			debug(2, "- insert");
-			child->new = false;
+			child->new = 0;
 			insert_into_cull_table(child);
 		}
 		put_object(child);
@@ -1434,11 +1273,11 @@ next:
 	case OBJTYPE_INTERMEDIATE:
 		debug(2, "- descend");
 
-		child->new = false;
-		scan_cursor = child;
+		child->new = 0;
+		scan = child;
 
 		debug(2, "<-- build_cull_table({%s})", curr->name);
-		return true;
+		return;
 
 	default:
 		error("Unexpected type");
@@ -1481,13 +1320,15 @@ dir_read_complete:
 		}
 	}
 
-	scan_cursor = curr->parent;
-	if (!scan_cursor)
+	scan = curr->parent;
+	if (!scan) {
 		debug(1, "Scan complete");
+		decant_cull_table();
+	}
 
 	debug(2, "<-- build_cull_table({%s})", curr->name);
 	put_object(curr);
-	return scan_cursor != NULL;
+	return;
 
 	/* delete unexpected objects that we've found */
 found_unexpected_object:
@@ -1503,63 +1344,72 @@ found_unexpected_object:
  */
 static void decant_cull_table(void)
 {
-	unsigned loop, avail, copy, leave, space, n;
+	int loop, space, avail, copy, leave, n;
 
-	if (scan_cursor)
+	if (scan)
 		error("Can't decant cull table whilst scanning");
 
+	/* if nothing there, scan again in a short while */
+	if (oldest_build < 0) {
+		signal(SIGALRM, sigalrm);
+		alarm(30);
+		return;
+	}
+
 	/* mark the new entries cullable */
-	for (loop = 0; loop < nr_in_build_table; loop++) {
+	for (loop = 0; loop <= oldest_build; loop++) {
 		if (!cullbuild[loop]->cullable) {
-			cullbuild[loop]->cullable = true;
+			cullbuild[loop]->cullable = 1;
 			ncullable++;
 		}
 	}
 
 	/* if the ready table is empty, copy the whole lot across */
-	if (nr_in_ready_table == 0) {
-		copy = nr_in_build_table;
+	if (oldest_ready == -1) {
+		copy = oldest_build + 1;
 
 		debug(1, "Decant (all %d)", copy);
 
 		n = copy * sizeof(cullready[0]);
 		memcpy(cullready, cullbuild, n);
 		memset(cullbuild, 0x6e, n);
-		nr_in_ready_table = nr_in_build_table;
-		nr_in_build_table = 0;
+		oldest_ready = oldest_build;
+		oldest_build = -1;
 		goto check;
 	}
 
 	/* decant some of the build table if there's space */
-	if (culltable_size < nr_in_ready_table)
-		error("Less than zero space in ready table");
-	space = culltable_size - nr_in_ready_table;
-	if (space == 0)
+	space = culltable_size - (oldest_ready + 1);
+	if (space <= 0) {
+		if (space < 0)
+			error("Less than zero space in ready table");
 		goto check;
+	}
 
 	/* work out how much of the build table we can copy */
-	copy = avail = nr_in_build_table;
+	copy = avail = oldest_build + 1;
 	if (copy > space)
 		copy = space;
 	leave = avail - copy;
 
-	debug(1, "Decant (%u/%u to %u)", copy, avail, space);
+	debug(1, "Decant (%d/%d to %d)", copy, avail, space);
 
 	/* make a hole in the ready table transfer "copy" elements from the end
 	 * of cullbuild (oldest) to the beginning of cullready (youngest)
 	 */
-	memmove(&cullready[copy], &cullready[0], nr_in_ready_table * sizeof(cullready[0]));
-	nr_in_ready_table += copy;
+	n = oldest_ready + 1;
+	memmove(&cullready[copy], &cullready[0], n * sizeof(cullready[0]));
+	oldest_ready += copy;
 
 	memcpy(&cullready[0], &cullbuild[leave], copy * sizeof(cullready[0]));
 	memset(&cullbuild[leave], 0x6b, copy * sizeof(cullbuild[0]));
-	nr_in_build_table = leave;
+	oldest_build = leave - 1;
 
 	if (copy + leave > culltable_size)
 		error("Scan table exceeded (%d+%d)", copy, leave);
 
 check:
-	for (loop = 0; loop < nr_in_ready_table; loop++)
+	for (loop = 0; loop < oldest_ready; loop++)
 		if (((long)cullready[loop] & 0xf0000000) == 0x60000000)
 			abort();
 }
@@ -1636,8 +1486,18 @@ static void cull_objects(void)
 	if (ncullable <= 0)
 		error("Cullable object count is inconsistent");
 
-	if (cullready[nr_in_ready_table - 1]->cullable) {
-		cull_object(cullready[nr_in_ready_table - 1]);
-		cullready[--nr_in_ready_table] = (void *)(0x6b000000 | __LINE__);
+	if (cullready[oldest_ready]->cullable) {
+		cull_object(cullready[oldest_ready]);
+		cullready[oldest_ready] = (void *)(0x6b000000 | __LINE__);
+		oldest_ready--;
+	}
+
+	/* must start refilling the cull table */
+	if (!scan && oldest_build <= culltable_size / 2 + 2) {
+		decant_cull_table();
+
+		debug(1, "Refilling cull table");
+		root.usage++;
+		scan = &root;
 	}
 }

@@ -1,10 +1,9 @@
-CFLAGS		:= -g -O2 -Wall -Wsign-compare
+CFLAGS		:= -g -O2 -Wall
 INSTALL		:= install
 DESTDIR		:=
 ETCDIR		:= /etc
 BINDIR		:= /bin
 SBINDIR		:= /sbin
-MANDIR		:= /usr/share/man
 SPECFILE	:= redhat/cachefilesd.spec
 
 LNS		:= ln -sf
@@ -15,8 +14,7 @@ LNS		:= ln -sf
 #
 ###############################################################################
 VERSION		:= $(word 2,$(shell grep "^Version:" $(SPECFILE)))
-TARBALL		:= cachefilesd-$(VERSION).tar
-ZTARBALL	:= $(TARBALL).bz2
+TARBALL		:= cachefilesd-$(VERSION).tar.bz2
 
 ###############################################################################
 #
@@ -48,11 +46,11 @@ cachefilesd: cachefilesd.c Makefile
 # Install everything
 #
 ###############################################################################
-MAN5	:= $(DESTDIR)$(MANDIR)/man5
-MAN8	:= $(DESTDIR)$(MANDIR)/man8
+MAN5	:= $(DESTDIR)/usr/share/man/man5
+MAN8	:= $(DESTDIR)/usr/share/man/man8
 
 install: all
-	$(INSTALL) -D -m 0755 cachefilesd $(DESTDIR)$(SBINDIR)/cachefilesd
+	$(INSTALL) -D cachefilesd $(DESTDIR)$(SBINDIR)/cachefilesd
 	$(INSTALL) -D -m 0644 cachefilesd.conf $(DESTDIR)$(ETCDIR)/cachefilesd.conf
 	$(INSTALL) -D -m 0644 cachefilesd.conf.5 $(MAN5)/cachefilesd.conf.5
 	$(INSTALL) -D -m 0644 cachefilesd.8 $(MAN8)/cachefilesd.8
@@ -75,11 +73,10 @@ distclean: clean
 # Generate a tarball
 #
 ###############################################################################
-$(ZTARBALL):
+$(TARBALL):
 	git archive --prefix=cachefilesd-$(VERSION)/ --format tar -o $(TARBALL) HEAD
-	bzip2 -9 <$(TARBALL) >$(ZTARBALL)
 
-tarball: $(ZTARBALL)
+tarball: $(TARBALL)
 
 ###############################################################################
 #
@@ -87,10 +84,9 @@ tarball: $(ZTARBALL)
 #
 ###############################################################################
 SRCBALL	:= rpmbuild/SOURCES/$(TARBALL)
-ZSRCBALL := rpmbuild/SOURCES/$(ZTARBALL)
 
 BUILDID	:= .local
-dist	:= $(word 2,$(shell grep -r "^%dist" /etc/rpm /usr/lib/rpm))
+dist	:= $(word 2,$(shell grep "%dist" /etc/rpm/macros.dist))
 release	:= $(word 2,$(shell grep ^Release: $(SPECFILE)))
 release	:= $(subst %{?dist},$(dist),$(release))
 release	:= $(subst %{?buildid},$(BUILDID),$(release))
@@ -113,8 +109,7 @@ rpm:
 	chmod ug-s rpmbuild
 	mkdir -p rpmbuild/{SPECS,SOURCES,BUILD,BUILDROOT,RPMS,SRPMS}
 	git archive --prefix=cachefilesd-$(VERSION)/ --format tar -o $(SRCBALL) HEAD
-	bzip2 -9 <$(SRCBALL) >$(ZSRCBALL)
-	rpmbuild -ts $(ZSRCBALL) --define "_srcrpmdir rpmbuild/SRPMS" $(RPMFLAGS)
+	rpmbuild -ts $(SRCBALL) --define "_srcrpmdir rpmbuild/SRPMS" $(RPMFLAGS)
 	rpmbuild --rebuild $(SRPM) $(RPMBUILDDIRS) $(RPMFLAGS)
 
 rpmlint: rpm
